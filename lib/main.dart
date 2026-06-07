@@ -124,6 +124,7 @@ class AppStore extends ChangeNotifier {
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_storageKey);
+    var normalized = false;
     if (raw != null) {
       final payload = jsonDecode(raw) as Map<String, dynamic>;
       offices
@@ -148,6 +149,7 @@ class AppStore extends ChangeNotifier {
           ),
         );
       deliveryPhone = payload['deliveryPhone'] as String? ?? '';
+      normalized = normalizeOfficeIds();
     }
     if (offices.isEmpty) {
       offices.addAll([
@@ -165,8 +167,29 @@ class AppStore extends ChangeNotifier {
         ),
       ]);
       await save();
+    } else if (normalized) {
+      await save();
     }
     notifyListeners();
+  }
+
+  bool normalizeOfficeIds() {
+    final seen = <String>{};
+    var changed = false;
+    for (var index = 0; index < offices.length; index += 1) {
+      final office = offices[index];
+      if (office.id.isEmpty || seen.contains(office.id)) {
+        offices[index] = Office(
+          id: newId(),
+          name: office.name,
+          phone: office.phone,
+          notes: office.notes,
+        );
+        changed = true;
+      }
+      seen.add(offices[index].id);
+    }
+    return changed;
   }
 
   Future<void> save() async {
@@ -256,6 +279,13 @@ class AppStore extends ChangeNotifier {
       if (office.id == id) return office;
     }
     return null;
+  }
+
+  List<Office> get officeOptions {
+    final seen = <String>{};
+    return offices
+        .where((office) => office.id.isNotEmpty && seen.add(office.id))
+        .toList(growable: false);
   }
 
   List<OrderItemMatch> pendingForOffice(String officeId) {
@@ -1280,6 +1310,7 @@ class _NewOrderScreenState extends State<NewOrderScreen> {
                   showSnack(context, 'Add an office first.');
                   return;
                 }
+                final officeOptions = store.officeOptions;
                 final order = SenoOrder(
                   id: newId(),
                   customerName: _customer.text.trim(),
@@ -1298,7 +1329,7 @@ class _NewOrderScreenState extends State<NewOrderScreen> {
                               ? 'Product'
                               : draft.name.text.trim(),
                           photoPath: draft.photoPath,
-                          officeId: draft.officeId ?? store.offices.first.id,
+                          officeId: draft.officeId ?? officeOptions.first.id,
                           originPrice: parseMoney(draft.originPrice.text),
                           customerPrice: parseMoney(draft.customerPrice.text),
                           status: 'Pending reservation',
@@ -1345,9 +1376,11 @@ class _DraftProductCardState extends State<DraftProductCard> {
   @override
   Widget build(BuildContext context) {
     final store = StoreScope.of(context);
-    final selectedOffice =
-        widget.draft.officeId ??
-        (store.offices.isNotEmpty ? store.offices.first.id : null);
+    final offices = store.officeOptions;
+    final draftOfficeId = widget.draft.officeId;
+    final selectedOffice = offices.any((office) => office.id == draftOfficeId)
+        ? draftOfficeId
+        : (offices.isNotEmpty ? offices.first.id : null);
     widget.draft.officeId = selectedOffice;
     return Card(
       child: Padding(
@@ -1397,7 +1430,7 @@ class _DraftProductCardState extends State<DraftProductCard> {
             DropdownButtonFormField<String>(
               initialValue: selectedOffice,
               decoration: const InputDecoration(labelText: 'Office'),
-              items: store.offices
+              items: offices
                   .map(
                     (office) => DropdownMenuItem(
                       value: office.id,
@@ -2184,6 +2217,7 @@ Future<void> showEditProductForm(
   SenoOrderItem? item,
 ]) async {
   final store = StoreScope.of(context);
+  final offices = store.officeOptions;
   final picker = ImagePicker();
   final name = TextEditingController(text: item?.productName ?? '');
   final origin = TextEditingController(
@@ -2196,8 +2230,11 @@ Future<void> showEditProductForm(
   var photoPath = item?.photoPath ?? '';
   var officeId = item?.officeId;
   var status = item?.status ?? 'Pending reservation';
-  if ((officeId == null || officeId.isEmpty) && store.offices.isNotEmpty) {
-    officeId = store.offices.first.id;
+  if ((officeId == null ||
+          officeId.isEmpty ||
+          !offices.any((office) => office.id == officeId)) &&
+      offices.isNotEmpty) {
+    officeId = offices.first.id;
   }
   final formKey = GlobalKey<FormState>();
 
@@ -2235,7 +2272,7 @@ Future<void> showEditProductForm(
                 DropdownButtonFormField<String>(
                   initialValue: officeId,
                   decoration: const InputDecoration(labelText: 'Office'),
-                  items: store.offices
+                  items: offices
                       .map(
                         (office) => DropdownMenuItem(
                           value: office.id,
@@ -2314,7 +2351,7 @@ Future<void> showEditProductForm(
                     ? 'Product'
                     : name.text.trim(),
                 photoPath: photoPath,
-                officeId: officeId ?? store.offices.first.id,
+                officeId: officeId ?? offices.first.id,
                 originPrice: parseMoney(origin.text),
                 customerPrice: parseMoney(customer.text),
                 status: status,
@@ -2610,4 +2647,9 @@ String shortDate(DateTime value) {
 
 String blank(String value) => value.trim().isEmpty ? '-' : value.trim();
 
-String newId() => DateTime.now().microsecondsSinceEpoch.toString();
+int _idCounter = 0;
+
+String newId() {
+  _idCounter += 1;
+  return '${DateTime.now().microsecondsSinceEpoch}-$_idCounter';
+}
