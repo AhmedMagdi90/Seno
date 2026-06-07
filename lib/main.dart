@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
@@ -2014,7 +2015,7 @@ class ProductPhotoBox extends StatelessWidget {
                   ],
                 ),
               )
-            : Image.file(File(path), fit: BoxFit.cover),
+            : ProductImage(path: path, fit: BoxFit.cover),
       ),
     );
   }
@@ -2038,8 +2039,23 @@ class ProductThumb extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       child: path.isEmpty
           ? const Icon(Icons.image_outlined)
-          : Image.file(File(path), fit: BoxFit.cover),
+          : ProductImage(path: path, fit: BoxFit.cover),
     );
+  }
+}
+
+class ProductImage extends StatelessWidget {
+  const ProductImage({super.key, required this.path, required this.fit});
+
+  final String path;
+  final BoxFit fit;
+
+  @override
+  Widget build(BuildContext context) {
+    if (kIsWeb) {
+      return Image.network(path, fit: fit);
+    }
+    return Image.file(File(path), fit: fit);
   }
 }
 
@@ -2085,7 +2101,7 @@ Future<void> openOrderDetails(BuildContext context, SenoOrder order) async {
 }
 
 Future<String?> takeSharedPhotoPath() async {
-  if (!Platform.isAndroid) return null;
+  if (kIsWeb || !Platform.isAndroid) return null;
   try {
     return await shareChannel.invokeMethod<String>('takeSharedImage');
   } catch (_) {
