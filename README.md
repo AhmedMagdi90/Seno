@@ -8,11 +8,17 @@ Seno is an Android-first Flutter MVP for online sellers who receive customer ord
 - Dashboard with order, reservation, delivery, and profit summary.
 - Orders screen with customer/phone search and status filtering.
 - New order form with customer details, pickup/shipment mode, address, notes, product photo, office, origin price, customer price, and paid amount.
+- Edit existing customer/order details.
+- Add or edit products after an order is created.
 - Product photo capture from camera or gallery through `image_picker`.
+- Android share intent for product images shared into Seno from Messenger/gallery.
 - Offices screen with office contacts and one-click reservation for all pending products assigned to that office.
+- Reservation batch history per office.
 - Reservation and delivery WhatsApp handoff using prepared messages through `url_launcher`; messages are also copied to clipboard.
-- Order details screen with product status updates, payment updates, delivery handoff, customer received, and close order actions.
+- Order details screen with product status updates, payment history, delivery handoff, customer received, and close order actions.
 - Finance screen with sales, cost, paid, remaining, and profit totals.
+- Delivery WhatsApp number setting.
+- Backup export as copied JSON.
 - Local persistence through `shared_preferences`.
 
 ## Run

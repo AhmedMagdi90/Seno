@@ -36,6 +36,8 @@ const orderStatuses = [
   'Cancelled',
 ];
 
+const shareChannel = MethodChannel('app.seno.seller/share');
+
 class SenoApp extends StatelessWidget {
   const SenoApp({super.key, required this.store});
 
@@ -116,6 +118,8 @@ class AppStore extends ChangeNotifier {
   static const _storageKey = 'seno_state_v1';
   final List<SenoOrder> orders = [];
   final List<Office> offices = [];
+  final List<ReservationBatch> reservationBatches = [];
+  String deliveryPhone = '';
 
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -136,6 +140,14 @@ class AppStore extends ChangeNotifier {
             (item) => SenoOrder.fromJson(item as Map<String, dynamic>),
           ),
         );
+      reservationBatches
+        ..clear()
+        ..addAll(
+          (payload['reservationBatches'] as List<dynamic>? ?? []).map(
+            (item) => ReservationBatch.fromJson(item as Map<String, dynamic>),
+          ),
+        );
+      deliveryPhone = payload['deliveryPhone'] as String? ?? '';
     }
     if (offices.isEmpty) {
       offices.addAll([
@@ -164,6 +176,10 @@ class AppStore extends ChangeNotifier {
       jsonEncode({
         'offices': offices.map((office) => office.toJson()).toList(),
         'orders': orders.map((order) => order.toJson()).toList(),
+        'reservationBatches': reservationBatches
+            .map((batch) => batch.toJson())
+            .toList(),
+        'deliveryPhone': deliveryPhone,
       }),
     );
   }
@@ -194,7 +210,19 @@ class AppStore extends ChangeNotifier {
     }
   }
 
-  Future<void> markOfficeReservationSent(String officeId) async {
+  Future<ReservationBatch> markOfficeReservationSent(
+    String officeId,
+    List<OrderItemMatch> matches,
+    String message,
+  ) async {
+    final batch = ReservationBatch(
+      id: newId(),
+      officeId: officeId,
+      itemIds: matches.map((match) => match.item.id).toList(),
+      sentAt: DateTime.now(),
+      message: message,
+    );
+    reservationBatches.insert(0, batch);
     for (final order in orders) {
       for (final item in order.items) {
         if (item.officeId == officeId && item.status == 'Pending reservation') {
@@ -204,10 +232,17 @@ class AppStore extends ChangeNotifier {
       order.status = order.derivedStatus;
     }
     await saveAndNotify();
+    return batch;
+  }
+
+  Future<void> updateDeliveryPhone(String phone) async {
+    deliveryPhone = phone.trim();
+    await saveAndNotify();
   }
 
   Future<void> clearAll() async {
     orders.clear();
+    reservationBatches.clear();
     await saveAndNotify();
   }
 
@@ -233,6 +268,24 @@ class AppStore extends ChangeNotifier {
       }
     }
     return matches;
+  }
+
+  List<ReservationBatch> batchesForOffice(String officeId) => reservationBatches
+      .where((batch) => batch.officeId == officeId)
+      .toList(growable: false);
+
+  String exportJson() {
+    const encoder = JsonEncoder.withIndent('  ');
+    return encoder.convert({
+      'exportedAt': DateTime.now().toIso8601String(),
+      'app': 'Seno',
+      'offices': offices.map((office) => office.toJson()).toList(),
+      'orders': orders.map((order) => order.toJson()).toList(),
+      'reservationBatches': reservationBatches
+          .map((batch) => batch.toJson())
+          .toList(),
+      'deliveryPhone': deliveryPhone,
+    });
   }
 
   double get totalSales => orders.fold(0, (sum, order) => sum + order.total);
@@ -284,7 +337,19 @@ class SenoOrder {
     required this.paidAmount,
     required this.createdAt,
     required this.items,
-  });
+    List<PaymentRecord>? payments,
+  }) : payments =
+           payments ??
+           (paidAmount > 0
+               ? [
+                   PaymentRecord(
+                     id: newId(),
+                     amount: paidAmount,
+                     paidAt: createdAt,
+                     note: 'Initial paid amount',
+                   ),
+                 ]
+               : []);
 
   final String id;
   String customerName;
@@ -296,6 +361,7 @@ class SenoOrder {
   double paidAmount;
   DateTime createdAt;
   final List<SenoOrderItem> items;
+  final List<PaymentRecord> payments;
 
   double get total => items.fold(0, (sum, item) => sum + item.customerPrice);
   double get cost => items.fold(0, (sum, item) => sum + item.originPrice);
@@ -339,6 +405,7 @@ class SenoOrder {
     'paidAmount': paidAmount,
     'createdAt': createdAt.toIso8601String(),
     'items': items.map((item) => item.toJson()).toList(),
+    'payments': payments.map((payment) => payment.toJson()).toList(),
   };
 
   factory SenoOrder.fromJson(Map<String, dynamic> json) => SenoOrder(
@@ -355,7 +422,76 @@ class SenoOrder {
     items: (json['items'] as List<dynamic>? ?? [])
         .map((item) => SenoOrderItem.fromJson(item as Map<String, dynamic>))
         .toList(),
+    payments: (json['payments'] as List<dynamic>? ?? [])
+        .map((item) => PaymentRecord.fromJson(item as Map<String, dynamic>))
+        .toList(),
   );
+}
+
+class PaymentRecord {
+  PaymentRecord({
+    required this.id,
+    required this.amount,
+    required this.paidAt,
+    this.note = '',
+  });
+
+  final String id;
+  final double amount;
+  final DateTime paidAt;
+  final String note;
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'amount': amount,
+    'paidAt': paidAt.toIso8601String(),
+    'note': note,
+  };
+
+  factory PaymentRecord.fromJson(Map<String, dynamic> json) => PaymentRecord(
+    id: json['id'] as String,
+    amount: (json['amount'] as num?)?.toDouble() ?? 0,
+    paidAt:
+        DateTime.tryParse(json['paidAt'] as String? ?? '') ?? DateTime.now(),
+    note: json['note'] as String? ?? '',
+  );
+}
+
+class ReservationBatch {
+  ReservationBatch({
+    required this.id,
+    required this.officeId,
+    required this.itemIds,
+    required this.sentAt,
+    required this.message,
+  });
+
+  final String id;
+  final String officeId;
+  final List<String> itemIds;
+  final DateTime sentAt;
+  final String message;
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'officeId': officeId,
+    'itemIds': itemIds,
+    'sentAt': sentAt.toIso8601String(),
+    'message': message,
+  };
+
+  factory ReservationBatch.fromJson(Map<String, dynamic> json) =>
+      ReservationBatch(
+        id: json['id'] as String,
+        officeId: json['officeId'] as String? ?? '',
+        itemIds: (json['itemIds'] as List<dynamic>? ?? [])
+            .map((item) => item.toString())
+            .toList(),
+        sentAt:
+            DateTime.tryParse(json['sentAt'] as String? ?? '') ??
+            DateTime.now(),
+        message: json['message'] as String? ?? '',
+      );
 }
 
 class SenoOrderItem {
@@ -420,6 +556,24 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    shareChannel.setMethodCallHandler((call) async {
+      if (call.method != 'sharedImageReceived') return;
+      final path = call.arguments as String?;
+      if (!mounted || path == null || path.isEmpty) return;
+      await openNewOrder(context, initialPhotoPath: path);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _openSharedPhoto());
+  }
+
+  Future<void> _openSharedPhoto() async {
+    final path = await takeSharedPhotoPath();
+    if (!mounted || path == null || path.isEmpty) return;
+    await openNewOrder(context, initialPhotoPath: path);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -696,6 +850,7 @@ class OfficesScreen extends StatelessWidget {
               else
                 ...store.offices.map((office) {
                   final pending = store.pendingForOffice(office.id);
+                  final batches = store.batchesForOffice(office.id);
                   return Card(
                     child: Padding(
                       padding: const EdgeInsets.all(14),
@@ -760,6 +915,20 @@ class OfficesScreen extends StatelessWidget {
                                     '- ${match.item.productName} for ${match.order.customerName}',
                                   ),
                                 ),
+                          ],
+                          if (batches.isNotEmpty) ...[
+                            const SizedBox(height: 12),
+                            const Divider(),
+                            Text(
+                              'Last reservation: ${shortDate(batches.first.sentAt)} | ${batches.first.itemIds.length} products',
+                              style: TextStyle(color: Colors.grey.shade700),
+                            ),
+                            TextButton.icon(
+                              onPressed: () =>
+                                  showReservationHistory(context, office),
+                              icon: const Icon(Icons.history),
+                              label: const Text('Reservation history'),
+                            ),
                           ],
                         ],
                       ),
@@ -924,6 +1093,39 @@ class SettingsScreen extends StatelessWidget {
                     'Track origin price, customer price, paid, and remaining.',
               ),
               const SizedBox(height: 20),
+              SectionHeader(title: 'Operations'),
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.local_shipping_outlined),
+                  title: const Text('Delivery WhatsApp'),
+                  subtitle: Text(
+                    store.deliveryPhone.isEmpty
+                        ? 'Not set'
+                        : store.deliveryPhone,
+                  ),
+                  trailing: const Icon(Icons.edit_outlined),
+                  onTap: () => showDeliverySettings(context),
+                ),
+              ),
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.backup_outlined),
+                  title: const Text('Export backup'),
+                  subtitle: const Text(
+                    'Copy all orders, offices, payments, and reservations as JSON.',
+                  ),
+                  trailing: const Icon(Icons.copy),
+                  onTap: () async {
+                    await Clipboard.setData(
+                      ClipboardData(text: store.exportJson()),
+                    );
+                    if (context.mounted) {
+                      showSnack(context, 'Backup JSON copied.');
+                    }
+                  },
+                ),
+              ),
+              const SizedBox(height: 20),
               OutlinedButton.icon(
                 onPressed: store.orders.isEmpty
                     ? null
@@ -949,7 +1151,9 @@ class SettingsScreen extends StatelessWidget {
 }
 
 class NewOrderScreen extends StatefulWidget {
-  const NewOrderScreen({super.key});
+  const NewOrderScreen({super.key, this.initialPhotoPath = ''});
+
+  final String initialPhotoPath;
 
   @override
   State<NewOrderScreen> createState() => _NewOrderScreenState();
@@ -962,8 +1166,14 @@ class _NewOrderScreenState extends State<NewOrderScreen> {
   final _address = TextEditingController();
   final _notes = TextEditingController();
   final _paid = TextEditingController(text: '0');
-  final _draftItems = <DraftItem>[DraftItem()];
+  late final List<DraftItem> _draftItems;
   String _receiptMethod = 'Shipment';
+
+  @override
+  void initState() {
+    super.initState();
+    _draftItems = [DraftItem(photoPath: widget.initialPhotoPath)];
+  }
 
   @override
   void dispose() {
@@ -1269,7 +1479,16 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
           (item) => item.id == widget.orderId,
         );
         return Scaffold(
-          appBar: AppBar(title: Text(order.customerName)),
+          appBar: AppBar(
+            title: Text(order.customerName),
+            actions: [
+              IconButton(
+                tooltip: 'Edit order',
+                onPressed: () => showEditOrderForm(context, order),
+                icon: const Icon(Icons.edit_outlined),
+              ),
+            ],
+          ),
           body: ListView(
             padding: const EdgeInsets.all(16),
             children: [
@@ -1341,7 +1560,14 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                 ],
               ),
               const SizedBox(height: 16),
-              SectionHeader(title: 'Products'),
+              SectionHeader(
+                title: 'Products',
+                action: TextButton.icon(
+                  onPressed: () => showEditProductForm(context, order),
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add'),
+                ),
+              ),
               ...order.items.map(
                 (item) => Card(
                   child: Padding(
@@ -1374,6 +1600,12 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                                   ),
                                 ],
                               ),
+                            ),
+                            IconButton(
+                              tooltip: 'Edit product',
+                              onPressed: () =>
+                                  showEditProductForm(context, order, item),
+                              icon: const Icon(Icons.edit_outlined),
                             ),
                           ],
                         ),
@@ -1422,6 +1654,14 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                       final amount = parseMoney(_payment.text);
                       if (amount <= 0) return;
                       order.paidAmount += amount;
+                      order.payments.add(
+                        PaymentRecord(
+                          id: newId(),
+                          amount: amount,
+                          paidAt: DateTime.now(),
+                          note: 'Manual payment',
+                        ),
+                      );
                       order.status = order.derivedStatus;
                       _payment.clear();
                       await store.updateOrder(order);
@@ -1430,6 +1670,21 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                   ),
                 ],
               ),
+              if (order.payments.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                ...order.payments.reversed.map(
+                  (payment) => Card(
+                    child: ListTile(
+                      leading: const Icon(Icons.receipt_outlined),
+                      title: Text(money(payment.amount)),
+                      subtitle: Text(
+                        '${shortDate(payment.paidAt)}'
+                        '${payment.note.isEmpty ? '' : ' | ${payment.note}'}',
+                      ),
+                    ),
+                  ),
+                ),
+              ],
               const SizedBox(height: 16),
               Wrap(
                 spacing: 8,
@@ -1474,12 +1729,14 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
 }
 
 class DraftItem {
+  DraftItem({this.photoPath = ''});
+
   final name = TextEditingController();
   final originPrice = TextEditingController();
   final customerPrice = TextEditingController();
   final notes = TextEditingController();
   String? officeId;
-  String photoPath = '';
+  String photoPath;
 
   void dispose() {
     name.dispose();
@@ -1777,16 +2034,30 @@ class FeatureRow extends StatelessWidget {
   }
 }
 
-Future<void> openNewOrder(BuildContext context) async {
-  await Navigator.of(
-    context,
-  ).push(MaterialPageRoute(builder: (_) => const NewOrderScreen()));
+Future<void> openNewOrder(
+  BuildContext context, {
+  String initialPhotoPath = '',
+}) async {
+  await Navigator.of(context).push(
+    MaterialPageRoute(
+      builder: (_) => NewOrderScreen(initialPhotoPath: initialPhotoPath),
+    ),
+  );
 }
 
 Future<void> openOrderDetails(BuildContext context, SenoOrder order) async {
   await Navigator.of(context).push(
     MaterialPageRoute(builder: (_) => OrderDetailsScreen(orderId: order.id)),
   );
+}
+
+Future<String?> takeSharedPhotoPath() async {
+  if (!Platform.isAndroid) return null;
+  try {
+    return await shareChannel.invokeMethod<String>('takeSharedImage');
+  } catch (_) {
+    return null;
+  }
 }
 
 Future<ImageSource?> chooseImageSource(BuildContext context) {
@@ -1809,6 +2080,301 @@ Future<ImageSource?> chooseImageSource(BuildContext context) {
       ),
     ),
   );
+}
+
+Future<void> showEditOrderForm(BuildContext context, SenoOrder order) async {
+  final store = StoreScope.of(context);
+  final customer = TextEditingController(text: order.customerName);
+  final phone = TextEditingController(text: order.phone);
+  final address = TextEditingController(text: order.address);
+  final notes = TextEditingController(text: order.notes);
+  var receiptMethod = order.receiptMethod;
+  final formKey = GlobalKey<FormState>();
+
+  await showDialog<void>(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setDialogState) => AlertDialog(
+        title: const Text('Edit order'),
+        content: Form(
+          key: formKey,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: customer,
+                  decoration: const InputDecoration(labelText: 'Customer name'),
+                  validator: requiredText,
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: phone,
+                  decoration: const InputDecoration(labelText: 'Phone number'),
+                  keyboardType: TextInputType.phone,
+                ),
+                const SizedBox(height: 12),
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(
+                      value: 'Shipment',
+                      label: Text('Shipment'),
+                      icon: Icon(Icons.local_shipping_outlined),
+                    ),
+                    ButtonSegment(
+                      value: 'Pickup',
+                      label: Text('Pickup'),
+                      icon: Icon(Icons.store_outlined),
+                    ),
+                  ],
+                  selected: {receiptMethod},
+                  onSelectionChanged: (value) =>
+                      setDialogState(() => receiptMethod = value.first),
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: address,
+                  decoration: const InputDecoration(labelText: 'Address'),
+                  minLines: 2,
+                  maxLines: 4,
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: notes,
+                  decoration: const InputDecoration(labelText: 'Notes'),
+                  minLines: 2,
+                  maxLines: 4,
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              if (!formKey.currentState!.validate()) return;
+              order.customerName = customer.text.trim();
+              order.phone = phone.text.trim();
+              order.receiptMethod = receiptMethod;
+              order.address = address.text.trim();
+              order.notes = notes.text.trim();
+              order.status = order.derivedStatus;
+              await store.updateOrder(order);
+              if (context.mounted) Navigator.of(context).pop();
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    ),
+  );
+  customer.dispose();
+  phone.dispose();
+  address.dispose();
+  notes.dispose();
+}
+
+Future<void> showEditProductForm(
+  BuildContext context,
+  SenoOrder order, [
+  SenoOrderItem? item,
+]) async {
+  final store = StoreScope.of(context);
+  final picker = ImagePicker();
+  final name = TextEditingController(text: item?.productName ?? '');
+  final origin = TextEditingController(
+    text: item == null ? '' : money(item.originPrice),
+  );
+  final customer = TextEditingController(
+    text: item == null ? '' : money(item.customerPrice),
+  );
+  final notes = TextEditingController(text: item?.notes ?? '');
+  var photoPath = item?.photoPath ?? '';
+  var officeId = item?.officeId;
+  var status = item?.status ?? 'Pending reservation';
+  if ((officeId == null || officeId.isEmpty) && store.offices.isNotEmpty) {
+    officeId = store.offices.first.id;
+  }
+  final formKey = GlobalKey<FormState>();
+
+  await showDialog<void>(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setDialogState) => AlertDialog(
+        title: Text(item == null ? 'Add product' : 'Edit product'),
+        content: Form(
+          key: formKey,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ProductPhotoBox(
+                  path: photoPath,
+                  onPick: () async {
+                    final source = await chooseImageSource(context);
+                    if (source == null) return;
+                    final picked = await picker.pickImage(
+                      source: source,
+                      imageQuality: 78,
+                    );
+                    if (picked != null) {
+                      setDialogState(() => photoPath = picked.path);
+                    }
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: name,
+                  decoration: const InputDecoration(labelText: 'Product name'),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: officeId,
+                  decoration: const InputDecoration(labelText: 'Office'),
+                  items: store.offices
+                      .map(
+                        (office) => DropdownMenuItem(
+                          value: office.id,
+                          child: Text(office.name),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) => setDialogState(() => officeId = value),
+                  validator: (value) => value == null ? 'Select office' : null,
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: origin,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: 'Origin price',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: TextFormField(
+                        controller: customer,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: 'Customer price',
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: status,
+                  decoration: const InputDecoration(labelText: 'Status'),
+                  items: productStatuses
+                      .map(
+                        (status) => DropdownMenuItem(
+                          value: status,
+                          child: Text(status),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) =>
+                      setDialogState(() => status = value ?? status),
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: notes,
+                  decoration: const InputDecoration(labelText: 'Product notes'),
+                  minLines: 2,
+                  maxLines: 4,
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              if (!formKey.currentState!.validate()) return;
+              final updated = SenoOrderItem(
+                id: item?.id ?? newId(),
+                productName: name.text.trim().isEmpty
+                    ? 'Product'
+                    : name.text.trim(),
+                photoPath: photoPath,
+                officeId: officeId ?? store.offices.first.id,
+                originPrice: parseMoney(origin.text),
+                customerPrice: parseMoney(customer.text),
+                status: status,
+                notes: notes.text.trim(),
+              );
+              if (item == null) {
+                order.items.add(updated);
+              } else {
+                final index = order.items.indexWhere(
+                  (existing) => existing.id == item.id,
+                );
+                if (index >= 0) order.items[index] = updated;
+              }
+              order.status = order.derivedStatus;
+              await store.updateOrder(order);
+              if (context.mounted) Navigator.of(context).pop();
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    ),
+  );
+  name.dispose();
+  origin.dispose();
+  customer.dispose();
+  notes.dispose();
+}
+
+Future<void> showDeliverySettings(BuildContext context) async {
+  final store = StoreScope.of(context);
+  final phone = TextEditingController(text: store.deliveryPhone);
+  await showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Delivery WhatsApp'),
+      content: TextField(
+        controller: phone,
+        keyboardType: TextInputType.phone,
+        decoration: const InputDecoration(
+          labelText: 'Delivery phone',
+          helperText: 'Used when sending customer address details.',
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () async {
+            await store.updateDeliveryPhone(phone.text);
+            if (context.mounted) Navigator.of(context).pop();
+          },
+          child: const Text('Save'),
+        ),
+      ],
+    ),
+  );
+  phone.dispose();
 }
 
 Future<void> showOfficeForm(BuildContext context, {Office? office}) async {
@@ -1896,12 +2462,64 @@ Future<void> sendOfficeReservation(
     ),
   ];
   final message = lines.join('\n');
-  await store.markOfficeReservationSent(office.id);
+  await store.markOfficeReservationSent(office.id, matches, message);
   if (!context.mounted) return;
   await openWhatsAppOrCopy(context, office.phone, message);
 }
 
+Future<void> showReservationHistory(BuildContext context, Office office) async {
+  final store = StoreScope.of(context);
+  final batches = store.batchesForOffice(office.id);
+  await showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text('${office.name} reservations'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: batches.isEmpty
+            ? const Text('No reservations sent yet.')
+            : ListView.separated(
+                shrinkWrap: true,
+                itemCount: batches.length,
+                separatorBuilder: (_, _) => const Divider(),
+                itemBuilder: (context, index) {
+                  final batch = batches[index];
+                  return ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(
+                      '${shortDate(batch.sentAt)} | ${batch.itemIds.length} products',
+                    ),
+                    subtitle: Text(
+                      batch.message,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: IconButton(
+                      tooltip: 'Copy message',
+                      onPressed: () async {
+                        await Clipboard.setData(
+                          ClipboardData(text: batch.message),
+                        );
+                        if (context.mounted) showSnack(context, 'Copied.');
+                      },
+                      icon: const Icon(Icons.copy),
+                    ),
+                  );
+                },
+              ),
+      ),
+      actions: [
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Done'),
+        ),
+      ],
+    ),
+  );
+}
+
 Future<void> sendDeliveryMessage(BuildContext context, SenoOrder order) async {
+  final store = StoreScope.of(context);
   final items = order.items.map((item) => '- ${item.productName}').join('\n');
   final message = [
     'Delivery details',
@@ -1917,7 +2535,10 @@ Future<void> sendDeliveryMessage(BuildContext context, SenoOrder order) async {
     'Paid: ${money(order.paidAmount)}',
     'Remaining: ${money(order.remaining)}',
   ].join('\n');
-  await openWhatsAppOrCopy(context, order.phone, message);
+  final targetPhone = store.deliveryPhone.isEmpty
+      ? order.phone
+      : store.deliveryPhone;
+  await openWhatsAppOrCopy(context, targetPhone, message);
 }
 
 Future<void> openWhatsAppOrCopy(
@@ -1977,6 +2598,14 @@ double parseMoney(String value) {
 
 String money(double value) {
   return value.toStringAsFixed(value.truncateToDouble() == value ? 0 : 2);
+}
+
+String shortDate(DateTime value) {
+  final month = value.month.toString().padLeft(2, '0');
+  final day = value.day.toString().padLeft(2, '0');
+  final hour = value.hour.toString().padLeft(2, '0');
+  final minute = value.minute.toString().padLeft(2, '0');
+  return '${value.year}-$month-$day $hour:$minute';
 }
 
 String blank(String value) => value.trim().isEmpty ? '-' : value.trim();
